@@ -92,10 +92,10 @@ def main():
         if should_post(event)
     ]
 
-    new_events = [
-        event for event in events
-        if event["id"] not in posted
-    ]
+    if not posted:
+        save_posted({event["id"] for event in events})
+        print("Initial setup complete. Existing hackathons marked as seen.")
+        return
 
     # Prevent flooding Discord on the very first run.
     # Post at most 10 listings per run.
