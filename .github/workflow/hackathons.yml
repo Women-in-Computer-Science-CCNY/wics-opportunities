@@ -1,0 +1,40 @@
+name: WiCS Hackathon Feed
+
+on:
+  schedule:
+    - cron: "15 */6 * * *"
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  post-hackathons:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check for new hackathons
+        env:
+          DISCORD_HACKATHONS_WEBHOOK: ${{ secrets.DISCORD_HACKATHONS_WEBHOOK }}
+        run: python hackathons.py
+
+      - name: Save posted hackathon history
+        run: |
+          if git diff --quiet posted_hackathons.json; then
+            echo "No new hackathons to save."
+          else
+            git config user.name "wics-hackathon-bot"
+            git config user.email "actions@github.com"
+            git add posted_hackathons.json
+            git commit -m "Update posted hackathons"
+            git push
+          fi
