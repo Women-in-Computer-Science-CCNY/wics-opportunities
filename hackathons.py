@@ -1,11 +1,16 @@
 import json
 import os
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date
 
-FEED_URL = "https://hackathonsboard.netlify.app/events.json"
+FEED_URL = (
+    "https://raw.githubusercontent.com/"
+    "Hack-HQ/hackhq/main/.github/scripts/listings.json"
+)
+
 WEBHOOK_URL = os.environ["DISCORD_HACKATHONS_WEBHOOK"]
 STATE_FILE = "posted_hackathons.json"
+MAX_POSTS = 10
 
 
 def get_json(url):
@@ -13,12 +18,14 @@ def get_json(url):
         url,
         headers={"User-Agent": "WiCS-CCNY-Hackathon-Bot/1.0"}
     )
+
     with urllib.request.urlopen(req, timeout=30) as response:
         return json.load(response)
 
 
 def post_discord(payload):
     data = json.dumps(payload).encode("utf-8")
+
     req = urllib.request.Request(
         WEBHOOK_URL,
         data=data,
@@ -28,6 +35,7 @@ def post_discord(payload):
         },
         method="POST"
     )
+
     with urllib.request.urlopen(req, timeout=30):
         pass
 
@@ -45,91 +53,154 @@ def save_posted(posted):
         json.dump(sorted(posted), f, indent=2)
 
 
-def format_date(value):
-    if not value:
-        return "Check event page"
+def event_key(event):
+    return event.get("id") or event.get("url")
 
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return dt.strftime("%b %d, %Y")
-    except ValueError:
-        return "Check event page"
+
+def is_high_school_only(event):
+    text = " ".join([
+        event.get("title", ""),
+        event.get("company_name", ""),
+        event.get("source", "")
+    ]).lower()
+
+    high_school_phrases = [
+        "high school",
+        "ages 13–18",
+        "ages 13-18",
+        "ages 13–17",
+        "ages 13-17",
+        "teen hackathon",
+        "teen game jam",
+    ]
+
+    return any(phrase in text for phrase in high_school_phrases)
 
 
 def should_post(event):
-    # Ignore ended events
-    if event.get("status") == "ended":
+    if not event.get("active", False):
         return False
 
-    # Ignore private/invite-only events
-    if event.get("inviteOnly"):
+    if not event.get("is_visible", True):
         return False
 
-    # WiCS is a college organization, so skip high-school-only listings
-    if event.get("audience") == "high-school":
+    state = event.get("state", "").lower()
+
+    if state not in ("open", "opens_soon"):
         return False
 
-    # Keep university and generally open events
-    if event.get("audience") not in ("university", "open"):
+    if is_high_school_only(event):
         return False
+
+    url = event.get("url")
+    if not url:
+        return False
+
+    # Extra protection against events that already ended
+    end_date = event.get("endDate")
+    if end_date:
+        try:
+            if date.fromisoformat(end_date) < date.today():
+                return False
+        except ValueError:
+            pass
+
+    deadline = event.get("deadline")
+    if deadline:
+        try:
+            if date.fromisoformat(deadline) < date.today():
+                return False
+        except ValueError:
+            pass
 
     return True
 
 
+def format_date_range(event):
+    start = event.get("startDate")
+    end = event.get("endDate")
+
+    if start and end:
+        if start == end:
+            return start
+        return f"{start} → {end}"
+
+    if start:
+        return start
+
+    return "Check event page"
+
+
 def main():
-    feed = get_json(FEED_URL)
+    events = get_json(FEED_URL)
 
-    # Warn in logs if one of the upstream sources failed
-    for source in feed.get("sources", []):
-        if not source.get("ok", True):
-            print(f"WARNING: Source unavailable: {source.get('name')}")
-
-    posted = load_posted()
-
-    events = [
-        event
-        for event in feed.get("events", [])
+    eligible = [
+        event for event in events
         if should_post(event)
     ]
 
+    posted = load_posted()
+
+    # FIRST RUN:
+    # Remember existing listings without flooding Discord.
     if not posted:
-        save_posted({event["id"] for event in events})
-        print("Initial setup complete. Existing hackathons marked as seen.")
+        initial_ids = {
+            event_key(event)
+            for event in eligible
+            if event_key(event)
+        }
+
+        save_posted(initial_ids)
+
+        print(
+            f"Initial setup complete. "
+            f"Marked {len(initial_ids)} existing hackathons as seen."
+        )
         return
+
     new_events = [
-        event for event in events
-        if event["id"] not in posted
+        event for event in eligible
+        if event_key(event) not in posted
     ]
 
-    new_events = new_events[:10]
-
-    # Prevent flooding Discord on the very first run.
-    # Post at most 10 listings per run.
-    new_events = new_events[:10]
+    # Oldest/newest source ordering can vary, so limit Discord volume.
+    new_events = new_events[:MAX_POSTS]
 
     for event in new_events:
+        key = event_key(event)
+
         title = event.get("title", "Hackathon")
         url = event.get("url")
-        organizer = event.get("organizer") or event.get("sourceName") or "Organizer"
-        location = event.get("locationLabel") or "Location not listed"
-        format_type = (event.get("format") or "Unknown").title()
-        audience = (event.get("audience") or "Open").replace("-", " ").title()
-        deadline = format_date(event.get("endsAt"))
-        event_date = event.get("dateLabel") or "Check event page"
+        host = event.get("company_name", "Organizer")
 
-        themes = event.get("themes") or []
-        theme_text = ", ".join(themes[:4]) if themes else "Various"
+        locations = event.get("locations") or []
+        location = ", ".join(locations) if locations else "See event page"
+
+        format_type = event.get("format", "See event page")
+        prize = event.get("prize", "TBA")
+        deadline = event.get("deadline", "Check event page")
+        dates = format_date_range(event)
+
+        state = event.get("state", "open")
+
+        if state == "opens_soon":
+            status = "⏳ Opens Soon"
+        else:
+            status = "✅ Open"
 
         description = (
-            f"**Hosted by:** {organizer}\n"
-            f"📅 **Dates:** {event_date}\n"
+            f"**Hosted by:** {host}\n"
+            f"📅 **Dates:** {dates}\n"
             f"⏰ **Deadline:** {deadline}\n"
             f"📍 **Location:** {location}\n"
             f"💻 **Format:** {format_type}\n"
-            f"🎓 **Eligibility:** {audience}\n"
-            f"🧩 **Themes:** {theme_text}\n\n"
+            f"🏆 **Prize:** {prize}\n"
+            f"📌 **Status:** {status}\n\n"
             f"🔗 **[View / Apply]({url})**\n\n"
-            f"💬 Looking for teammates? Start a thread on this post!"
+            f"💬 Looking for teammates? "
+            f"Start a thread on this post!\n\n"
+            f"*Always verify eligibility and deadlines "
+            f"on the official event page.*"
         )
 
         payload = {
@@ -144,13 +215,15 @@ def main():
         }
 
         post_discord(payload)
-        posted.add(event["id"])
+
+        posted.add(key)
+
         print(f"Posted: {title}")
 
     save_posted(posted)
 
-    print(f"Found {len(events)} eligible events.")
-    print(f"Posted {len(new_events)} new events.")
+    print(f"Found {len(eligible)} eligible hackathons.")
+    print(f"Posted {len(new_events)} new hackathons.")
 
 
 if __name__ == "__main__":
